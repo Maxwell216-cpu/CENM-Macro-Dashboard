@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CENM Capital — Macro Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0a0b; --panel:#111113; --line:#1f1f23; --line2:#2a2a2f;
+    --ink:#e8e2d4; --dim:#8a857a; --faint:#5a564e;
+    --gold:#c8a44d; --good:#6f9e7d; --bad:#cf6b5a; --flat:#7a9cc6;
+    --c-tenYear:#c8a44d; --c-mortgage:#e8e2d4; --c-spread:#7a9cc6; --c-corePCE:#c47f5a; --c-unemploy:#6f9e7d;
+    --mono:'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    --serif:'Fraunces', Georgia, serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);}
+  ::-webkit-scrollbar{width:8px;height:8px;}
+  ::-webkit-scrollbar-thumb{background:#2a2a2f;border-radius:4px;}
+  input:focus{outline:none;border-color:var(--gold)!important;}
+  .tile{transition:border-color .15s;}
+  .tile:hover{border-color:var(--line2)!important;}
+  .chip{transition:all .15s ease;cursor:pointer;user-select:none;}
+  button{cursor:pointer;font-family:var(--mono);}
+  .grid-texture{
+    position:fixed;inset:0;pointer-events:none;opacity:.4;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:64px 64px;
+    -webkit-mask-image:radial-gradient(circle at 50% 0%,black,transparent 80%);
+    mask-image:radial-gradient(circle at 50% 0%,black,transparent 80%);
+  }
+  .wrap{max-width:960px;margin:0 auto;padding:32px 20px 80px;position:relative;}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:28px;}
+  .seclabel{font-size:10px;letter-spacing:.25em;color:var(--dim);margin-bottom:10px;font-weight:500;}
+  table{width:100%;border-collapse:collapse;font-size:11.5px;min-width:520px;}
+  th{font-weight:500;letter-spacing:.12em;font-size:9.5px;color:var(--dim);border-bottom:1px solid var(--line2);padding:10px 12px;}
+  td{padding:10px 12px;}
+  .field label{font-size:9px;letter-spacing:.12em;color:var(--dim);}
+  .field input{background:#0a0a0b;border:1px solid var(--line2);color:var(--ink);padding:9px 10px;font-family:var(--mono);font-size:13px;border-radius:2px;width:100%;}
+  .delx{color:var(--faint);cursor:pointer;font-size:13px;}
+  .delx:hover{color:var(--bad);}
+</style>
+</head>
+<body>
+<div class="grid-texture"></div>
+<div class="wrap" id="app"></div>
+
+<script>
+/* ============================================================
+   CENM CAPITAL — MACRO DASHBOARD  (standalone, localStorage)
+   Five metrics. Logged weekly. Read through a flipper's lens.
+   ============================================================ */
+
+const METRICS = [
+  { key:"tenYear",  label:"10-Year Treasury", short:"10Y",   priority:1, computed:false, hint:"The base rate everything else prices off of." },
+  { key:"mortgage", label:"30-Yr Mortgage",   short:"MTG",   priority:2, computed:false, hint:"Your buyer's affordability — the exit lever." },
+  { key:"spread",   label:"Mortgage Spread",  short:"SPRD",  priority:3, computed:true,  hint:"MTG − 10Y. Wide = room for rates to fall." },
+  { key:"corePCE",  label:"Core PCE",         short:"PCE",   priority:4, computed:false, hint:"The Fed's inflation gauge. Sticky = higher-for-longer." },
+  { key:"unemploy", label:"Unemployment",     short:"UNEMP", priority:5, computed:false, hint:"Rising → Fed cuts later, but a softer buyer pool." },
+];
+const SEED = [{ date:"2026-05-24", tenYear:4.47, mortgage:6.53, corePCE:3.3, unemploy:4.3 }];
+const STORAGE_KEY = "cenm-macro-snapshots";
+const SPREAD_AVG = 1.7;
+
+let chartMetrics = ["tenYear","mortgage"];
+let logOpen = false;
+
+/* ---------- helpers ---------- */
+const withSpread = s => ({ ...s, spread:+(s.mortgage - s.tenYear).toFixed(2) });
+const fmtPct = v => (v===null||v===undefined||v==="") ? "—" : Number(v).toFixed(2)+"%";
+const niceDate = d => new Date(d+"T00:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"});
+function mostRecentSunday(){ const d=new Date(); d.setDate(d.getDate()-d.getDay()); return d.toISOString().slice(0,10); }
+const esc = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+/* ---------- storage ---------- */
+function loadSnapshots(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if(parsed && parsed.length) return parsed;
+  }catch(e){}
+  const seeded = SEED.map(withSpread);
+  saveSnapshots(seeded);
+  return seeded;
+}
+function saveSnapshots(arr){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }catch(e){} }
+
+let snapshots = loadSnapshots();
+
+const sorted = () => [...snapshots].sort((a,b)=>a.date.localeCompare(b.date));
+const latest = () => sorted()[sorted().length-1];
+const prev   = () => sorted()[sorted().length-2];
+function delta(key){ const l=latest(), p=prev(); if(!l||!p) return null; return +(l[key]-p[key]).toFixed(2); }
+
+/* ---------- flip read ---------- */
+function flipRead(){
+  const l = latest(); if(!l) return [];
+  const out = [];
+  const dMtg = delta("mortgage");
+  if(dMtg!==null){
+    if(dMtg<=-0.05) out.push({tone:"good", text:`Mortgage rate fell ${Math.abs(dMtg).toFixed(2)} pts WoW. Buyer affordability is improving — favorable backdrop for a clean, fast exit.`});
+    else if(dMtg>=0.05) out.push({tone:"bad", text:`Mortgage rate rose ${dMtg.toFixed(2)} pts WoW. Affordability tightening — underwrite longer days-on-market and don't bank on top-of-market resale.`});
+    else out.push({tone:"flat", text:`Mortgage rate flat WoW. No new pressure on the exit either way.`});
+  }
+  if(l.spread > SPREAD_AVG+0.25) out.push({tone:"good", text:`Spread at ${l.spread.toFixed(2)}% sits above the ~1.7% norm — mortgage rates have room to compress even if the 10Y holds. Potential tailwind brewing for resale demand.`});
+  else if(l.spread < SPREAD_AVG-0.15) out.push({tone:"flat", text:`Spread at ${l.spread.toFixed(2)}% is tight — little cushion for rates to ease on their own.`});
+  if(l.corePCE!==null && l.corePCE>2.5) out.push({tone:"bad", text:`Core PCE at ${l.corePCE.toFixed(1)}% is well above the Fed's 2% target. Do NOT underwrite a flip that needs rate relief to pencil — higher-for-longer is the base case.`});
+  const dUn = delta("unemploy");
+  if(dUn!==null && dUn>=0.1) out.push({tone:"flat", text:`Unemployment ticking up. That pulls Fed cuts forward eventually — but a weaker labor market also thins your buyer pool. Net it carefully.`});
+  out.push({tone:"rule", text:`Bragg's rule: rates are an exit-risk input, not a deal-maker. A flip that only works if rates fall is a bet, not an acquisition.`});
+  return out;
+}
+
+/* ---------- SVG chart (hand-rolled, no library) ---------- */
+function buildChart(){
+  const data = sorted();
+  if(data.length < 2){
+    return `<div style="height:240px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px;text-align:center;padding:20px;line-height:1.6">
+      One week logged. Add a few more Sunday updates and<br>the trend lines start telling you something.</div>`;
+  }
+  const W=900, H=240, padL=44, padR=16, padT=14, padB=28;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const active = METRICS.filter(m=>chartMetrics.includes(m.key));
+  let vals=[];
+  active.forEach(m=>data.forEach(d=>{ if(d[m.key]!==null&&d[m.key]!==undefined) vals.push(d[m.key]); }));
+  if(!vals.length) return `<div style="height:240px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px">Select a metric to plot.</div>`;
+  let min=Math.min(...vals), max=Math.max(...vals);
+  if(min===max){ min-=0.5; max+=0.5; }
+  const padV=(max-min)*0.15||0.3; min-=padV; max+=padV;
+  const x = i => padL + (data.length===1?plotW/2:(i/(data.length-1))*plotW);
+  const y = v => padT + plotH - ((v-min)/(max-min))*plotH;
+
+  // gridlines + y labels
+  let grid="", yLabels="";
+  const ticks=4;
+  for(let t=0;t<=ticks;t++){
+    const val=min+(max-min)*(t/ticks);
+    const yy=y(val);
+    grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#1f1f23" stroke-width="1"/>`;
+    yLabels+=`<text x="${padL-8}" y="${yy+3}" text-anchor="end" font-size="10" fill="#8a857a" font-family="var(--mono)">${val.toFixed(1)}%</text>`;
+  }
+  // x labels
+  let xLabels="";
+  data.forEach((d,i)=>{ xLabels+=`<text x="${x(i)}" y="${H-8}" text-anchor="middle" font-size="10" fill="#8a857a" font-family="var(--mono)">${esc(niceDate(d.date))}</text>`; });
+  // lines + dots
+  let lines="";
+  active.forEach(m=>{
+    const pts=data.map((d,i)=>(d[m.key]==null?null:`${x(i)},${y(d[m.key])}`)).filter(Boolean);
+    lines+=`<polyline points="${pts.join(" ")}" fill="none" stroke="var(--c-${m.key})" stroke-width="1.8"/>`;
+    data.forEach((d,i)=>{ if(d[m.key]!=null) lines+=`<circle cx="${x(i)}" cy="${y(d[m.key])}" r="2.4" fill="var(--c-${m.key})"/>`; });
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet">${grid}${yLabels}${xLabels}${lines}</svg>`;
+}
+
+/* ---------- render ---------- */
+function render(){
+  const l = latest();
+  const tiles = METRICS.map(m=>{
+    const d=delta(m.key);
+    const dColor = d===null?"var(--faint)": d>0?"var(--bad)": d<0?"var(--good)":"var(--dim)";
+    const dArrow = d===null?"": d>0?"▲": d<0?"▼":"—";
+    const valColor = m.computed?"var(--flat)":"var(--ink)";
+    const badge = m.priority<=2 ? `<span title="Top flipper signal" style="font-size:8px;color:var(--gold);border:1px solid var(--gold);border-radius:2px;padding:1px 4px;letter-spacing:.1em">P${m.priority}</span>` : "";
+    return `<div class="tile" style="background:var(--panel);padding:16px 16px 14px;border:1px solid transparent;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span style="font-size:9.5px;letter-spacing:.16em;color:var(--dim);font-weight:500">${m.label.toUpperCase()}</span>${badge}
+      </div>
+      <div style="display:flex;align-items:baseline;gap:8px">
+        <span style="font-size:30px;font-weight:300;color:${valColor};letter-spacing:-.02em">${l?fmtPct(l[m.key]):"—"}</span>
+      </div>
+      <div style="font-size:10.5px;color:${dColor};margin-top:6px;letter-spacing:.04em;height:14px">${d===null?"no prior week":`${dArrow} ${Math.abs(d).toFixed(2)} WoW`}</div>
+      <div style="font-size:9.5px;color:var(--faint);margin-top:8px;line-height:1.4">${m.hint}</div>
+    </div>`;
+  }).join("");
+
+  const fr = flipRead().map(r=>{
+    const map={good:"var(--good)",bad:"var(--bad)",flat:"var(--flat)",rule:"var(--gold)"};
+    const sym = r.tone==="rule"?"§": r.tone==="good"?"↑": r.tone==="bad"?"↓":"•";
+    return `<div style="display:flex;gap:10px;font-size:12px;line-height:1.5;color:${r.tone==="rule"?"var(--gold)":"var(--ink)"}">
+      <span style="color:${map[r.tone]};flex-shrink:0;margin-top:1px">${sym}</span>
+      <span style="font-style:${r.tone==="rule"?"italic":"normal"}">${esc(r.text)}</span></div>`;
+  }).join("");
+
+  const chips = METRICS.map(m=>{
+    const on=chartMetrics.includes(m.key);
+    return `<span class="chip" data-chip="${m.key}" style="font-size:9.5px;letter-spacing:.08em;padding:3px 8px;border-radius:2px;border:1px solid ${on?`var(--c-${m.key})`:"var(--line2)"};color:${on?`var(--c-${m.key})`:"var(--faint)"};background:${on?`var(--c-${m.key})14`:"transparent"}">${m.short}</span>`;
+  }).join("");
+
+  const rows = sorted().reverse().map(s=>`<tr style="border-bottom:1px solid var(--line)">
+    <td style="color:var(--ink)">${esc(niceDate(s.date))}</td>
+    <td style="text-align:right;color:var(--c-tenYear)">${fmtPct(s.tenYear)}</td>
+    <td style="text-align:right;color:var(--ink)">${fmtPct(s.mortgage)}</td>
+    <td style="text-align:right;color:var(--flat)">${fmtPct(s.spread)}</td>
+    <td style="text-align:right;color:var(--dim)">${fmtPct(s.corePCE)}</td>
+    <td style="text-align:right;color:var(--dim)">${fmtPct(s.unemploy)}</td>
+    <td style="text-align:right"><span class="delx" data-del="${s.date}" title="Delete">×</span></td></tr>`).join("");
+
+  const logForm = logOpen ? `<div style="background:var(--panel);border:1px solid var(--line2);border-top:none;padding:18px 16px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px">
+        ${field("date","WEEK (SUN)","date",mostRecentSunday(),"")}
+        ${field("tenYear","10-YR TREASURY %","number","","4.47")}
+        ${field("mortgage","MORTGAGE %","number","","6.53")}
+        ${field("corePCE","CORE PCE %","number","",(l?l.corePCE:"3.3"))}
+        ${field("unemploy","UNEMPLOY %","number","",(l?l.unemploy:"4.3"))}
+      </div>
+      <div style="font-size:10px;color:var(--faint);margin-top:12px;line-height:1.5">Spread auto-calculates (MTG − 10Y). PCE &amp; unemployment update monthly — leave blank to carry last value forward.</div>
+      <button id="saveBtn" style="margin-top:14px;background:var(--gold);color:#0a0a0b;border:none;padding:11px 22px;font-size:11px;letter-spacing:.15em;font-weight:600;border-radius:2px">SAVE SNAPSHOT</button>
+    </div>` : "";
+
+  document.getElementById("app").innerHTML = `
+    <div style="border-bottom:1px solid var(--line2);padding-bottom:18px;margin-bottom:24px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+        <div style="font-size:11px;letter-spacing:.35em;color:var(--gold);font-weight:500">CENM&nbsp;CAPITAL&nbsp;HOLDINGS</div>
+        <div style="font-size:10px;letter-spacing:.2em;color:var(--faint)">UPDATED&nbsp;${l?niceDate(l.date).toUpperCase():"—"} · ${snapshots.length} WEEK${snapshots.length===1?"":"S"} LOGGED</div>
+      </div>
+      <h1 style="font-family:var(--serif);font-weight:400;font-size:clamp(34px,8vw,56px);margin:10px 0 2px;letter-spacing:-.02em;line-height:.95">Macro Dashboard</h1>
+      <div style="font-size:12px;color:var(--dim);letter-spacing:.02em">Log it every Sunday. The patterns show up around month 3.</div>
+    </div>
+
+    <div class="tiles">${tiles}</div>
+
+    <div style="margin-bottom:28px">
+      <div class="seclabel">THE FLIP READ</div>
+      <div style="background:var(--panel);border:1px solid var(--line2);border-left:2px solid var(--gold);padding:16px 18px;display:flex;flex-direction:column;gap:11px">${fr}</div>
+    </div>
+
+    <div style="margin-bottom:28px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div class="seclabel" style="margin-bottom:0">TREND</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${chips}</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line2);margin-top:10px;padding:16px 8px 8px">${buildChart()}</div>
+    </div>
+
+    <div style="margin-bottom:28px">
+      <button id="logToggle" style="width:100%;background:${logOpen?"var(--panel)":"transparent"};color:var(--gold);border:1px solid var(--gold);padding:13px;font-size:11px;letter-spacing:.18em;border-radius:2px">${logOpen?"× CLOSE":"+ LOG THIS WEEK'S NUMBERS"}</button>
+      ${logForm}
+    </div>
+
+    <div>
+      <div class="seclabel">HISTORY</div>
+      <div style="border:1px solid var(--line2);overflow-x:auto">
+        <table>
+          <thead><tr style="background:var(--panel)">
+            <th style="text-align:left">WEEK</th><th style="text-align:right">10Y</th><th style="text-align:right">MTG</th>
+            <th style="text-align:right">SPRD</th><th style="text-align:right">PCE</th><th style="text-align:right">UNEMP</th><th></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="font-size:9.5px;color:var(--faint);margin-top:12px;line-height:1.6;letter-spacing:.03em">
+        Saved to this computer's browser storage — your entries persist between sessions on this machine.
+        Sources: 10Y &amp; PCE per market/BEA, mortgage per Freddie Mac PMMS, unemployment per BLS. Verify Sunday figures before logging.
+      </div>
+    </div>`;
+
+  wire();
+}
+
+function field(key,label,type,val,placeholder){
+  return `<label class="field" style="display:flex;flex-direction:column;gap:6px">
+    <span>${label}</span>
+    <input data-f="${key}" type="${type}" value="${esc(val)}" placeholder="${esc(placeholder)}" step="0.01"></label>`;
+}
+
+/* ---------- events ---------- */
+function wire(){
+  document.querySelectorAll("[data-chip]").forEach(el=>el.onclick=()=>{
+    const k=el.getAttribute("data-chip");
+    chartMetrics = chartMetrics.includes(k) ? chartMetrics.filter(x=>x!==k) : [...chartMetrics,k];
+    render();
+  });
+  document.getElementById("logToggle").onclick=()=>{ logOpen=!logOpen; render(); };
+  document.querySelectorAll("[data-del]").forEach(el=>el.onclick=()=>{
+    const date=el.getAttribute("data-del");
+    snapshots = snapshots.filter(s=>s.date!==date);
+    saveSnapshots(snapshots); render();
+  });
+  const saveBtn=document.getElementById("saveBtn");
+  if(saveBtn) saveBtn.onclick=()=>{
+    const get=k=>{ const el=document.querySelector(`[data-f="${k}"]`); return el?el.value:""; };
+    const tenYear=get("tenYear"), mortgage=get("mortgage");
+    if(tenYear===""||mortgage===""){ alert("10-Year Treasury and Mortgage are required."); return; }
+    const l=latest();
+    const entry=withSpread({
+      date:get("date")||mostRecentSunday(),
+      tenYear:+tenYear, mortgage:+mortgage,
+      corePCE: get("corePCE")===""?(l?l.corePCE:null):+get("corePCE"),
+      unemploy: get("unemploy")===""?(l?l.unemploy:null):+get("unemploy"),
+    });
+    snapshots = [...snapshots.filter(s=>s.date!==entry.date), entry];
+    saveSnapshots(snapshots);
+    logOpen=false; render();
+  };
+}
+
+render();
+</script>
+</body>
+</html>
